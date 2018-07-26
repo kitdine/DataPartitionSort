@@ -45,14 +45,14 @@ public class DataSort {
      * dataBlock list 为若干个无相交的数据块（dataBlock）有序排列组成
      * @return 排序结果
      */
-    public Object[] dataSortSimple(List<DataPartition> dataPartitions) {
+    public Integer[] dataSortSimple(List<DataPartition> dataPartitions) {
         TreeSet<Integer> sortedData = new TreeSet<>();
         for(DataPartition dataPartition : dataPartitions) {
             for(DataBlock dataBlock : dataPartition.getDataBlocks()) {
                 sortedData.addAll(Arrays.asList(dataBlock.getData()));
             }
         }
-        return sortedData.toArray();
+        return sortedData.toArray(new Integer[0]);
     }
 
     /**
@@ -66,7 +66,7 @@ public class DataSort {
      * @return 排序结果
      * @throws Exception    忽略异常
      */
-    public Object[] dataSort2(List<DataPartition> dataPartitions, boolean allowDuplicate) throws Exception {
+    public Integer[] dataSort2(List<DataPartition> dataPartitions, boolean allowDuplicate) throws Exception {
         ArrayList<Integer> result = new ArrayList<>();
         // 生成队列
         List<LinkedBlockingQueue<Integer>> partitionQueueList = new ArrayList<>(dataPartitions.size());
@@ -128,6 +128,6 @@ public class DataSort {
                 sortedData.clear();
             }
         }
-        return result.toArray();
+        return result.toArray(new Integer[0]);
     }
 }
