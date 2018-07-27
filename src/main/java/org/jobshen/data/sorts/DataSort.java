@@ -22,10 +22,22 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ThreadPoolExecutor.AbortPolicy;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.jobshen.data.module.DataBlock;
 import org.jobshen.data.module.DataPartition;
+
+import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  * DataSort Description:
@@ -67,8 +79,8 @@ public class DataSort {
      * @throws Exception    忽略异常
      */
     public Integer[] dataSort2(List<DataPartition> dataPartitions, boolean allowDuplicate) throws Exception {
-        ArrayList<Integer> result = new ArrayList<>();
         // 生成队列
+        int listSize = 0;
         List<LinkedBlockingQueue<Integer>> partitionQueueList = new ArrayList<>(dataPartitions.size());
         for (DataPartition dataPartition : dataPartitions) {
             LinkedBlockingQueue<Integer> queue = new LinkedBlockingQueue<>();
@@ -79,16 +91,148 @@ public class DataSort {
                 }
             }
             partitionQueueList.add(queue);
+            listSize += queue.size();
         }
-        while (partitionQueueList.size() > 0) {
+        return mergeSortedQueue(partitionQueueList, allowDuplicate, listSize).toArray(new Integer[0]);
+    }
+
+    /**
+     * 多线程生成队列
+     * @param dataPartitions
+     * @param allowDuplicate
+     * @return
+     * @throws Exception
+     */
+    public Integer[] dataSort3(List<DataPartition> dataPartitions, boolean allowDuplicate) throws Exception {
+        int cpuSize = Runtime.getRuntime().availableProcessors();
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+            cpuSize * 2,
+            cpuSize * 2,
+            0L,
+            TimeUnit.MILLISECONDS,
+            new LinkedBlockingDeque<>(dataPartitions.size()),
+            new ThreadFactoryBuilder().setNameFormat("data-partition-pool-%d").setDaemon(true).build(),
+            new AbortPolicy()
+        );
+        AtomicInteger listSize = new AtomicInteger(0);
+        CountDownLatch countDownLatch = new CountDownLatch(dataPartitions.size());
+
+        // 生成队列
+        List<LinkedBlockingQueue<Integer>> partitionQueueList = new ArrayList<>(dataPartitions.size());
+        for (final DataPartition dataPartition : dataPartitions) {
+            executor.execute(() -> {
+                LinkedBlockingQueue<Integer> queue = new LinkedBlockingQueue<>();
+                buildSingleQueue(dataPartition, queue);
+                partitionQueueList.add(queue);
+                listSize.addAndGet(queue.size());
+                countDownLatch.countDown();
+            });
+        }
+        countDownLatch.await();
+        executor.shutdown();
+        return mergeSortedQueue(partitionQueueList, allowDuplicate, listSize.get()).toArray(new Integer[0]);
+    }
+
+    /**
+     * 不及 dataSort3 待优化
+     * @param dataPartitions
+     * @param allowDuplicate
+     * @return
+     * @throws Exception
+     */
+    public Integer[] dataSort4(List<DataPartition> dataPartitions, boolean allowDuplicate) throws Exception {
+        int threadSize = Runtime.getRuntime().availableProcessors() * 2;
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+            threadSize,
+            threadSize,
+            0L,
+            TimeUnit.MILLISECONDS,
+            new SynchronousQueue<>(),
+            new ThreadFactoryBuilder().setNameFormat("data-partition-pool-%d").setDaemon(true).build(),
+            new AbortPolicy()
+        );
+        CompletionService<LinkedBlockingQueue<Integer>> taskCompletionService = new ExecutorCompletionService<>(executor);
+        AtomicInteger listSize = new AtomicInteger(0);
+
+        List<LinkedBlockingQueue<Integer>> finalQueueList = new ArrayList<>(threadSize);
+        int splitCount = dataPartitions.size() % threadSize == 0 ? dataPartitions.size() / threadSize : dataPartitions.size() / threadSize + 1;
+        for(int i = 0; i < threadSize; i++) {
+            final int count = i;
+            taskCompletionService.submit(() -> {
+                LinkedBlockingQueue<Integer> queue = new LinkedBlockingQueue<>();
+                AtomicInteger tmpQueueSizes = new AtomicInteger(0);
+                int queueSize = (count+1)*splitCount > dataPartitions.size() ? dataPartitions.size() - count*splitCount : splitCount;
+                ThreadPoolExecutor tmpExecutor = new ThreadPoolExecutor(
+                    threadSize,
+                    threadSize,
+                    0L,
+                    TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(),
+                    new ThreadFactoryBuilder().setNameFormat("data-pool-"+count+"-%d").setDaemon(true).build(),
+                    new AbortPolicy()
+                );
+                CompletionService<LinkedBlockingQueue<Integer>> tmpTaskService = new ExecutorCompletionService<>(tmpExecutor);
+                ArrayList<LinkedBlockingQueue<Integer>> tmpQueueList = Lists.newArrayListWithExpectedSize(queueSize);
+                for(int j = 0; j < splitCount; j++) {
+                    final int jcount =  j + count*splitCount;
+                    tmpTaskService.submit(() -> {
+                        LinkedBlockingQueue<Integer> tmpQueue = new LinkedBlockingQueue<>();
+                        if(jcount > dataPartitions.size() -1) {
+                            return tmpQueue;
+                        }
+                        DataPartition dataPartition = dataPartitions.get(jcount);
+                        buildSingleQueue(dataPartition, tmpQueue);
+                        return  tmpQueue;
+
+                    });
+                }
+                for(int k = 0; k < splitCount; k++) {
+                    LinkedBlockingQueue<Integer> future = tmpTaskService.take().get();
+                    if (!future.isEmpty()) {
+                        tmpQueueList.add(future);
+                        tmpQueueSizes.addAndGet(future.size());
+                    }
+                }
+                tmpExecutor.shutdown();
+                ArrayList<Integer> tmpList = mergeSortedQueue(tmpQueueList, allowDuplicate, tmpQueueSizes.get());
+                for (Integer aTmpList : tmpList) {
+                    queue.put(aTmpList);
+                }
+                listSize.addAndGet(tmpList.size());
+                return queue;
+            });
+        }
+        for(int j = 0; j < threadSize; j++) {
+            finalQueueList.add(taskCompletionService.take().get());
+        }
+        executor.shutdown();
+        return mergeSortedQueue(finalQueueList, allowDuplicate, listSize.get()).toArray(new Integer[0]);
+    }
+
+    private void buildSingleQueue(DataPartition dataPartition, LinkedBlockingQueue<Integer> tmpQueue) {
+        for (int j = 0; j < dataPartition.getDataBlocks().size(); j++) {
+            DataBlock dataBlock = dataPartition.getDataBlocks().get(j);
+            for (int k = 0; k < dataBlock.getData().length; k++) {
+                try {
+                    tmpQueue.put(dataBlock.getData()[k]);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+
+    private ArrayList<Integer> mergeSortedQueue(List<LinkedBlockingQueue<Integer>> list, boolean allowDuplicate, int size) {
+        ArrayList<Integer> result = Lists.newArrayListWithExpectedSize(size);
+        while (list.size() > 0) {
             // 获取第一个队列
-            LinkedBlockingQueue<Integer> queue0 = partitionQueueList.get(0);
+            LinkedBlockingQueue<Integer> queue0 = list.get(0);
             while (true) {
                 //弹出头元素
                 Integer firstData = queue0.poll();
                 if (firstData == null) {
                     // 将该队列移除
-                    partitionQueueList.remove(0);
+                    list.remove(0);
                     break;
                 }
                 // 用个set记录从多个队列中取出的数据，这些数据需要继续排序：
@@ -96,14 +240,14 @@ public class DataSort {
                 // 先把data放入set：
                 sortedData.add(firstData);
                 // 倒序获取队列，
-                for (int i = partitionQueueList.size() - 1; i > 0; i--) {
-                    LinkedBlockingQueue<Integer> queueReverse = partitionQueueList.get(i);
+                for (int i = list.size() - 1; i > 0; i--) {
+                    LinkedBlockingQueue<Integer> queueReverse = list.get(i);
                     while (true) {
                         // 获取头元素，但不删除
                         Integer dataReverse = queueReverse.peek();
                         if (dataReverse == null) {
                             //队列为空 则移除
-                            partitionQueueList.remove(i);
+                            list.remove(i);
                             break;
                         }
                         // dataReverse小于firstData，则把dataReverse放入sortedData，会自动排序
@@ -128,6 +272,6 @@ public class DataSort {
                 sortedData.clear();
             }
         }
-        return result.toArray(new Integer[0]);
+        return result;
     }
 }

@@ -21,9 +21,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import java.util.TreeSet;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ThreadPoolExecutor.AbortPolicy;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.jobshen.data.module.DataBlock;
 import org.jobshen.data.module.DataPartition;
+
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  * MockData Description:
@@ -35,33 +43,52 @@ import org.jobshen.data.module.DataPartition;
  */
 public class MockData {
 
-    public static List<DataPartition> generatorDatas(int partitionSize, int blockMaxSize, int blockMinSize, int arrayMaxSize, int arrayMinSize) {
+    public static List<DataPartition> generatorDatas(int partitionSize, int blockMaxSize, int blockMinSize, int arrayMaxSize, int arrayMinSize) throws InterruptedException {
+        int cpuSize = Runtime.getRuntime().availableProcessors();
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+            cpuSize * 2,
+            cpuSize * 2,
+            0L,
+            TimeUnit.MILLISECONDS,
+            new LinkedBlockingDeque<>(partitionSize),
+            new ThreadFactoryBuilder().setNameFormat("data-mock-pool-%d").setDaemon(true).build(),
+            new AbortPolicy()
+        );
+        CountDownLatch countDownLatch = new CountDownLatch(partitionSize);
         Random random = new Random();
-        TreeSet<Integer> set = new TreeSet<>();
+
         List<DataPartition> list = new ArrayList<>(partitionSize);
-        int min, max,count = 0;
+        AtomicInteger count = new AtomicInteger(0);
         for (int i=0;i<partitionSize;i++) {
-            DataPartition dp = new DataPartition();
-            int blockSize = random.nextInt(blockMaxSize)%(blockMaxSize-blockMinSize+1) + blockMinSize;
-            int tmp = Integer.MAX_VALUE / blockSize;
-            ArrayList<DataBlock> blockList = new ArrayList<>(blockSize);
-            for (int j=0;j<blockSize;j++) {
-                min = tmp * j;
-                max = tmp * (j+1);
-                DataBlock block = new DataBlock();
-                int arraySize = random.nextInt(arrayMaxSize)%(arrayMaxSize-arrayMinSize+1) + arrayMinSize;
-                for (int k=0;k<arraySize;k++) {
-                    set.add(random.nextInt(max)%(max-min+1) + min);
-                    count++;
+            executor.execute(() -> {
+                TreeSet<Integer> set = new TreeSet<>();
+                DataPartition dp = new DataPartition();
+                int blockSize = random.nextInt(blockMaxSize)%(blockMaxSize-blockMinSize+1) + blockMinSize;
+                int tmp = Integer.MAX_VALUE / blockSize;
+                int tmpSize = 0;
+                ArrayList<DataBlock> blockList = new ArrayList<>(blockSize);
+                for (int j=0;j<blockSize;j++) {
+                    int min = tmp * j;
+                    int max = tmp * (j+1);
+                    DataBlock block = new DataBlock();
+                    int arraySize = random.nextInt(arrayMaxSize)%(arrayMaxSize-arrayMinSize+1) + arrayMinSize;
+                    for (int k=0;k<arraySize;k++) {
+                        set.add(random.nextInt(max)%(max-min+1) + min);
+                    }
+                    tmpSize += arraySize;
+                    block.setData(set.toArray(new Integer[0]));
+                    blockList.add(block);
+                    set.clear();
                 }
-                block.setData(set.toArray(new Integer[0]));
-                blockList.add(block);
-                set.clear();
-            }
-            dp.setDataBlocks(blockList);
-            list.add(dp);
+                dp.setDataBlocks(blockList);
+                list.add(dp);
+                count.addAndGet(tmpSize);
+                countDownLatch.countDown();
+            });
         }
-        System.out.println("size : " + count);
+        countDownLatch.await();
+        System.out.println("size : " + count.get());
+        executor.shutdown();
         return list;
     }
 }

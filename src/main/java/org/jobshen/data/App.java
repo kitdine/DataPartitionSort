@@ -13,16 +13,25 @@ import org.jobshen.data.sorts.DataSort;
  */
 public class App {
     public static void main( String[] args ) throws Exception{
-        List<DataPartition> list = MockData.generatorDatas(2000,20,50,100,500);
+        // 6500万 左右数据
+        final List<DataPartition> list = MockData.generatorDatas(2000,20,50,100,500);
         DataSort dataSort = new DataSort();
         long start,end;
         start = System.currentTimeMillis();
-        Integer[] result1 = dataSort.dataSortSimple(list);
+        dataSort.dataSortSimple(list);
         end = System.currentTimeMillis();
         System.out.println("dataSortSimple cost : " + (end - start));
         start = System.currentTimeMillis();
-        Integer[] result2 = dataSort.dataSort2(list, false);
+        dataSort.dataSort2(list, false);
         end = System.currentTimeMillis();
         System.out.println("dataSort2 cost : " + (end - start));
+        start = System.currentTimeMillis();
+        dataSort.dataSort3(list, false);
+        end = System.currentTimeMillis();
+        System.out.println("dataSort3 cost : " + (end - start));
+        start = System.currentTimeMillis();
+       dataSort.dataSort4(list, false);
+        end = System.currentTimeMillis();
+        System.out.println("dataSort4 cost : " + (end - start));
     }
 }
